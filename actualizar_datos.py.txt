@@ -1,0 +1,206 @@
+import json
+import math
+from datetime import datetime
+import pandas as pd
+import yfinance as yf
+
+# Definición de acciones de Colombia y sus códigos en Yahoo Finance
+ACCIONES_CONFIG = [
+    {
+        "ticker": "ECOPETROL.CL",
+        "nombre": "Ecopetrol",
+        "nemotecnico": "ECOPETROL",
+        "sector": "Petróleo y gas",
+    },
+    {
+        "ticker": "PFCIBEST.CL",
+        "nombre": "Grupo Cibest, preferencial",
+        "nemotecnico": "PFCIBEST",
+        "sector": "Financiero",
+    },
+    {
+        "ticker": "CIBEST.CL",
+        "nombre": "Grupo Cibest, ordinaria",
+        "nemotecnico": "CIBEST",
+        "sector": "Financiero",
+    },
+    {
+        "ticker": "ISA.BD",
+        "nombre": "ISA",
+        "nemotecnico": "ISA",
+        "sector": "Energía e infraestructura",
+    },
+    {
+        "ticker": "EXITO.BD",
+        "nombre": "Grupo Éxito",
+        "nemotecnico": "EXITO",
+        "sector": "Comercio",
+    },
+    {
+        "ticker": "PFAVAL.BD",
+        "nombre": "Grupo Aval, preferencial",
+        "nemotecnico": "PFAVAL",
+        "sector": "Financiero",
+    },
+    {
+        "ticker": "PFGRUPOARG.CL",
+        "nombre": "Grupo Argos, preferencial",
+        "nemotecnico": "PFGRUPOARG",
+        "sector": "Materiales y construcción",
+    },
+    {
+        "ticker": "BOGOTA.CL",
+        "nombre": "Banco de Bogotá",
+        "nemotecnico": "BOGOTA",
+        "sector": "Financiero",
+    },
+]
+
+
+def procesar_accion(config):
+    ticker_sym = config["ticker"]
+    tk = yf.Ticker(ticker_sym)
+    df = tk.history(period="3y", auto_adjust=False)
+
+    if df.empty or len(df) < 30:
+        raise ValueError(f"Sin datos suficientes para {ticker_sym}")
+
+    # Limpieza de zona horaria si existe
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+
+    # Últimos valores
+    ultimo_close = float(df["Close"].iloc[-1])
+    close_previo = float(df["Close"].iloc[-2])
+    fecha_ultimo = df.index[-1].strftime("%Y-%m-%d")
+
+    # 1. Variación día %
+    variacion_dia_pct = ((ultimo_close / close_previo) - 1.0) * 100.0
+
+    # Uso de Adj Close para rentabilidades (ajustado por dividendos/splits)
+    adj_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+    ultimo_adj = float(df[adj_col].iloc[-1])
+
+    # 2. Rentabilidad 1 año %
+    hace_1a = df.index[-1] - pd.DateOffset(years=1)
+    df_1a = df[df.index >= hace_1a]
+    if not df_1a.empty:
+        primer_adj_1a = float(df_1a[adj_col].iloc[0])
+        rent_1a_pct = ((ultimo_adj / primer_adj_1a) - 1.0) * 100.0
+    else:
+        rent_1a_pct = 0.0
+
+    # 3. Rentabilidad anual 3 años %
+    primer_adj_3a = float(df[adj_col].iloc[0])
+    dias_totales = (df.index[-1] - df.index[0]).days
+    anos_transcurridos = max(0.1, dias_totales / 365.25)
+    rent_anual_3a_pct = (
+        ((ultimo_adj / primer_adj_3a) ** (1.0 / anos_transcurridos)) - 1.0
+    ) * 100.0
+
+    # 4. Volatilidad anual % (rendimientos logarítmicos del último año)
+    if len(df_1a) > 2:
+        log_ret = (df_1a[adj_col] / df_1a[adj_col].shift(1)).apply(
+            lambda x: math.log(x) if x > 0 else 0
+        )
+        volatilidad_anual_pct = float(log_ret.std() * (252**0.5) * 100.0)
+    else:
+        volatilidad_anual_pct = 0.0
+
+    # 5. Caída máxima en 1 año (Drawdown máximo)
+    if not df_1a.empty:
+        max_acumulado = df_1a[adj_col].cummax()
+        drawdown = (df_1a[adj_col] - max_acumulado) / max_acumulado
+        caida_maxima_1a_pct = float(drawdown.min() * 100.0)
+    else:
+        caida_maxima_1a_pct = 0.0
+
+    # 6. Dividend Yield último año %
+    div_col = "Dividends" if "Dividends" in df.columns else None
+    if div_col and not df_1a.empty:
+        div_sum = float(df_1a[div_col].sum())
+        dividendo_rend_pct = (div_sum / ultimo_close) * 100.0 if ultimo_close > 0 else 0.0
+    else:
+        dividendo_rend_pct = 0.0
+
+    # 7. Histórico mensual (último cierre de cada mes)
+    df_mensual = df.resample("ME").last()
+    historico = []
+    for idx, row in df_mensual.iterrows():
+        historico.append(
+            {"mes": idx.strftime("%Y-%m"), "cierre": round(float(row["Close"]), 2)}
+        )
+
+    return {
+        "ticker": ticker_sym,
+        "nombre": config["nombre"],
+        "nemotecnico": config["nemotecnico"],
+        "sector": config["sector"],
+        "moneda": "COP",
+        "precio": round(ultimo_close, 2),
+        "fecha": fecha_ultimo,
+        "variacion_dia_pct": round(variacion_dia_pct, 2),
+        "rent_1a_pct": round(rent_1a_pct, 2),
+        "rent_anual_3a_pct": round(rent_anual_3a_pct, 2),
+        "volatilidad_anual_pct": round(volatilidad_anual_pct, 2),
+        "caida_maxima_1a_pct": round(caida_maxima_1a_pct, 2),
+        "dividendo_rend_pct": round(dividendo_rend_pct, 2),
+        "historico": historico,
+    }
+
+
+def obtener_trm():
+    try:
+        trm_tk = yf.Ticker("USDCOP=X")
+        df = trm_tk.history(period="5d")
+        if not df.empty:
+            val = float(df["Close"].iloc[-1])
+            fec = df.index[-1].strftime("%Y-%m-%d")
+            return {"valor": round(val, 2), "fecha": fec}
+    except Exception as e:
+        print(f"Advertencia al consultar TRM: {e}")
+    return None
+
+
+def main():
+    acciones_procesadas = []
+    errores = []
+
+    print("Iniciando descarga de datos de la Bolsa de Valores de Colombia...")
+
+    for config in ACCIONES_CONFIG:
+        try:
+            res = procesar_accion(config)
+            acciones_procesadas.append(res)
+            print(f"✓ {config['nemotecnico']} procesado correctamente.")
+        except Exception as e:
+            msg = str(e)
+            errores.append({"ticker": config["ticker"], "motivo": msg})
+            print(f"✗ Error en {config['ticker']}: {msg}")
+
+    # Verificar si todas fallaron
+    if not acciones_procesadas:
+        print("ERROR CRÍTICO: No se pudo obtener información de ninguna acción. Se conserva datos.json existente.")
+        return
+
+    trm_data = obtener_trm()
+
+    datos_json = {
+        "actualizado": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "fuente": "Yahoo Finance (yfinance); rentabilidades con precio ajustado por dividendos",
+        "trm": trm_data,
+        "acciones": acciones_procesadas,
+        "errores": errores,
+    }
+
+    with open("datos.json", "w", encoding="utf-8") as f:
+        json.dump(datos_json, f, ensure_ascii=False, indent=2)
+
+    print("\n--------------------------------------------------")
+    print(f"Resumen: {len(acciones_procesadas)} acciones actualizadas correctamente.")
+    print(f"Acciones con error: {len(errores)}")
+    print("Archivo datos.json actualizado exitosamente.")
+    print("--------------------------------------------------")
+
+
+if __name__ == "__main__":
+    main()
